@@ -1,0 +1,28 @@
+# APF_OA parameters. Loaded by launch/apf_nodes.launch.py.
+# goal_* are Gazebo world ENU coordinates (same frame the obstacles are
+# placed in); goal_z is altitude (m up).
+
+apf_planner_node:
+  ros__parameters:
+    goal_x: 12.0
+    goal_y: 0.0
+    goal_z: 2.0
+    goal_threshold: 0.5
+    k_att: 0.8              # attraction gain (proportional to distance)
+    att_saturation: 3.0     # pull stops growing beyond this distance (m)
+    k_rep: 1.2              # repulsion gain
+    influence_radius: 2.5   # repulsion cutoff d0 (m)
+    max_rep_force: 6.0      # clip on the summed repulsion
+    v_max: 1.5              # velocity command clamp (m/s)
+    stuck_speed_eps: 0.1    # local-minima: speed threshold (m/s)
+    stuck_ticks: 40         # local-minima: consecutive ticks (40 @ 20Hz = 2s)
+    log_dir: /home/blar/ws/src/APF/logs
+
+obstacle_sensor_node:
+  ros__parameters:
+    source: fixed           # fixed | depth
+    publish_rate: 10.0      # Hz
+    max_range: 8.0          # depth mode: ignore returns beyond this (m)
+    stride: 8               # depth mode: pixel subsampling step
+    ground_min_alt: 0.3     # depth mode: drop returns below this altitude (m)
+    max_points: 800         # depth mode: cap points sent to the planner

@@ -1,10 +1,13 @@
-# APF_OA — Artificial Potential Field Obstacle Avoidance
+# Artificial Potential Field Obstacle Avoidance
 
 > 3D APF (Artificial Potential Field) obstacle avoidance: a multirotor in PX4
 > SITL + Gazebo simulation, sensing obstacles with a depth camera (OakD-Lite
 > on x500_depth), computing the combined attractive/repulsive force in real
 > time to fly toward the goal. Sibling project:
 > [HOLO-DWA](https://github.com/blar-tw/HOLO-DWA) (same environment, DWA algorithm).
+## Demo
+![APF](APF.gif)
+The demo has been accelerated, and there are still some minor fluctuations when UAV is near the obstacle. I will further optimize this in a future iteration.
 
 ## Requirements
 

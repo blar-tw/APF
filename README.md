@@ -3,22 +3,25 @@
 > 3D APF (Artificial Potential Field) obstacle avoidance: a multirotor in PX4
 > SITL + Gazebo simulation, sensing obstacles with a depth camera (OakD-Lite
 > on x500_depth), computing the combined attractive/repulsive force in real
-> time to fly toward the goal. Sibling project:
-> [HOLO-DWA](https://github.com/blar-tw/HOLO-DWA) (same environment, DWA algorithm).
+> time to fly toward the goal.
 ## Demo
 ![APF](APF.gif)
+
 The demo has been accelerated, and there are still some minor fluctuations when UAV is near the obstacle. I will further optimize this in a future iteration.
+![rviz](APF_r.gif)
+
+Rviz version
 
 ## Requirements
 
 - WSL2 + Ubuntu 22.04 (or native), ROS 2 Humble
 - PX4-Autopilot v1.14.4 + Gazebo Garden (the `x500_depth` model and `4002`
   airframe are built in)
-- `ros_gz` bridge (must match the Gazebo version — see HOLO-DWA's
-  [installation.md](../HOLO-DWA/docs/installation.md))
+- `ros_gz` bridge (must match the Gazebo version)
 - Micro-XRCE-DDS-Agent, `px4_msgs`, `tmux`, Python 3.10 + `numpy`
 - Needs network access once on first launch: Gazebo downloads the OakD-Lite
   model from Fuel (cached afterward)
+- check [HOLO-DWA installation](https://github.com/blar-tw/HOLO-DWA/blob/main/docs/installation.md) for a detailed installation.
 
 ## Quick Start
 
@@ -122,3 +125,7 @@ Edit [`config/apf_params.yaml`](APF_OA/config/apf_params.yaml) and re-run
 `./run.sh` (no rebuild needed). Suggested tuning order: sweep offline with
 `tools/sim_offline.py --k-rep X --influence Y` first, and only move to
 Gazebo once the behavior looks right.
+
+## WIP
+
+changing different world.sdf and a changable goal in simulation.

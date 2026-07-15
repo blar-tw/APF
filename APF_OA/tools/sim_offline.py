@@ -46,6 +46,7 @@ def run(goal_enu, cfg, cylinders, dt=0.05, t_max=120.0, verbose=True):
     goal_ned = apf_core.enu_to_ned(goal_enu)
 
     pos = np.array([0.0, 0.0, -goal_enu[2]])  # start above origin at cruise alt
+    v_prev = np.zeros(3)
     detector = apf_core.StuckDetector(cfg)
     min_clear = float('inf')
     path_len = 0.0
@@ -53,7 +54,9 @@ def run(goal_enu, cfg, cylinders, dt=0.05, t_max=120.0, verbose=True):
 
     n_ticks = int(t_max / dt)
     for i in range(n_ticks):
-        v, info = apf_core.apf_step(pos, goal_ned, obs_ned, cfg)
+        v, info = apf_core.apf_step(pos, goal_ned, obs_ned, cfg,
+                                    v_prev=v_prev, dt=dt)
+        v_prev = v
         pos = pos + v * dt
         path_len += float(np.linalg.norm(v)) * dt
         min_clear = min(min_clear, cylinder_clearance(apf_core.ned_to_enu(pos), cylinders))

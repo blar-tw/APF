@@ -83,6 +83,75 @@ def test_repulsive_clipped(cfg):
     assert np.linalg.norm(f) <= cfg.max_rep_force + 1e-9
 
 
+# --- tangential (swirl) force ---
+
+FAR = 10.0  # nearest-obstacle distance beyond influence -> swirl taper fully on
+
+
+def test_tangential_perpendicular_and_horizontal(cfg):
+    f_rep = np.array([-1.0, 0.0, 0.0])          # repulsion pointing -N
+    t = apf_core.tangential_force(f_rep, np.array([1.0, 0.0, 0.0]), FAR, cfg)
+    assert t[2] == 0.0                          # never touches the vertical axis
+    assert abs(np.dot(t[:2], f_rep[:2])) < 1e-9  # perpendicular to the repulsion
+    assert np.isclose(np.linalg.norm(t), cfg.tangential_gain * 1.0)
+
+
+def test_tangential_steers_toward_goal_side(cfg):
+    # Obstacle straight ahead (-N repulsion), goal ahead and to +E:
+    # the swirl must push toward +E so the drone rounds the correct way.
+    f_rep = np.array([-1.0, 0.0, 0.0])
+    t = apf_core.tangential_force(f_rep, np.array([1.0, 0.5, 0.0]), FAR, cfg)
+    assert t[1] > 0
+
+
+def test_tangential_scales_with_repulsion(cfg):
+    g = np.array([1.0, 0.0, 0.0])
+    small = np.linalg.norm(apf_core.tangential_force(np.array([-0.5, 0, 0]), g, FAR, cfg))
+    big = np.linalg.norm(apf_core.tangential_force(np.array([-2.0, 0, 0]), g, FAR, cfg))
+    assert big > small > 0
+
+
+def test_tangential_zero_without_repulsion_or_when_disabled(cfg):
+    g = np.array([1.0, 0.0, 0.0])
+    assert np.allclose(apf_core.tangential_force(np.zeros(3), g, FAR, cfg), 0.0)
+    off = Config(tangential_gain=0.0)
+    assert np.allclose(apf_core.tangential_force(np.array([-1.0, 0, 0]), g, FAR, off), 0.0)
+
+
+def test_swirl_tapers_off_close_to_obstacle(cfg):
+    # Inside the safety radius the swirl must vanish so the radial push (which
+    # creates clearance) takes over; well outside it is at full strength.
+    f_rep, g = np.array([-1.0, 0.0, 0.0]), np.array([1.0, 0.0, 0.0])
+    close = apf_core.tangential_force(f_rep, g, cfg.swirl_safe_radius * 0.5, cfg)
+    full = apf_core.tangential_force(f_rep, g, cfg.swirl_safe_radius + cfg.swirl_taper_band, cfg)
+    assert np.allclose(close, 0.0)
+    assert np.isclose(np.linalg.norm(full), cfg.tangential_gain * 1.0)
+    assert apf_core.swirl_taper(cfg.swirl_safe_radius, cfg) == 0.0
+    assert apf_core.swirl_taper(1e9, cfg) == 1.0
+
+
+# --- acceleration (slew-rate) limiting ---
+
+def test_limit_acceleration_caps_the_step(cfg):
+    dt = 0.05
+    out = apf_core.limit_acceleration(np.zeros(3), np.array([1.5, 0.0, 0.0]), dt, cfg)
+    assert np.isclose(np.linalg.norm(out), cfg.max_accel * dt)  # 4.0 * 0.05 = 0.2
+    assert out[0] > 0  # moves toward the desired command
+
+
+def test_limit_acceleration_passthrough_small_change(cfg):
+    dt = 0.05
+    v_prev = np.array([1.0, 0.0, 0.0])
+    v_des = np.array([1.05, 0.0, 0.0])  # 0.05 < max step 0.2
+    assert np.allclose(apf_core.limit_acceleration(v_prev, v_des, dt, cfg), v_des)
+
+
+def test_limit_acceleration_disabled_when_infinite():
+    off = Config(max_accel=float('inf'))
+    v_des = np.array([10.0, -5.0, 2.0])
+    assert np.allclose(apf_core.limit_acceleration(np.zeros(3), v_des, 0.05, off), v_des)
+
+
 # --- velocity conversion ---
 
 def test_velocity_clamped_to_v_max(cfg):
@@ -113,6 +182,35 @@ def test_apf_step_no_obstacles(cfg):
     v, info = apf_core.apf_step(np.zeros(3), np.array([5.0, 0, 0]), np.zeros((0, 3)), cfg)
     assert v[0] > 0
     assert np.allclose(info["f_rep"], 0.0)
+    assert np.allclose(info["f_tan"], 0.0)
+
+
+def test_apf_step_accel_limits_against_previous_command(cfg):
+    # Same state, but with a previous command the jump must be bounded, while
+    # the raw (no v_prev) call still returns the full field velocity.
+    pos, goal, obs = np.zeros(3), np.array([10.0, 0, 0]), np.zeros((0, 3))
+    v_raw, _ = apf_core.apf_step(pos, goal, obs, cfg)
+    dt = 0.05
+    v_lim, _ = apf_core.apf_step(pos, goal, obs, cfg, v_prev=np.zeros(3), dt=dt)
+    assert np.linalg.norm(v_raw) > cfg.max_accel * dt          # field wants a big step
+    assert np.linalg.norm(v_lim) <= cfg.max_accel * dt + 1e-9  # limiter caps it
+
+
+def test_smoothed_apf_escapes_symmetric_gate(cfg):
+    # Two obstacles straddling the straight path form a head-on local minimum -
+    # the exact case where a plain APF chatters in place. Swirl + accel limit
+    # must carry the drone through to the goal instead of stalling/oscillating.
+    obstacles = np.array([[6.0, 0.9, 0.0], [6.0, -0.9, 0.0]])
+    goal = np.array([12.0, 0.0, 0.0])
+    pos, v_prev, dt = np.zeros(3), np.zeros(3), 0.05
+    reached = False
+    for _ in range(4000):  # 200 s of sim time, ample margin
+        v, info = apf_core.apf_step(pos, goal, obstacles, cfg, v_prev=v_prev, dt=dt)
+        v_prev, pos = v, pos + v * dt
+        if info["dist_goal"] < cfg.goal_threshold:
+            reached = True
+            break
+    assert reached and pos[0] > 6.0  # got past the gate at N=6, not stuck before it
 
 
 # --- local minima detection ---

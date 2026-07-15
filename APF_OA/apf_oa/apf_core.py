@@ -17,9 +17,12 @@ class Config:
     att_saturation: float = 3.0
 
     # Repulsive (Khatib): per obstacle point within influence_radius,
-    # F = k_rep * (1/d - 1/d0) / d^2, directed away from the point
-    k_rep: float = 1.2
-    influence_radius: float = 2.5
+    # F = k_rep * (1/d - 1/d0) / d^2, directed away from the point.
+    # k_rep and influence_radius were raised (1.2->1.8, 2.5->3.0) so avoidance
+    # starts earlier and pushes harder - this restores the clearance margin the
+    # command-smoothing lag would otherwise eat into (the drone reacts sooner).
+    k_rep: float = 1.8
+    influence_radius: float = 3.0
     max_rep_force: float = 6.0
     min_obstacle_dist: float = 0.05  # numerical floor for 1/d terms
 
@@ -30,8 +33,31 @@ class Config:
     n_az_sectors: int = 12
     n_el_sectors: int = 3
 
+    # Tangential ("swirl") force: a horizontal component perpendicular to the
+    # net repulsion, biased toward the goal side. A purely radial push points
+    # straight back when an obstacle sits between drone and goal, so attraction
+    # and repulsion cancel and the drone bounces in place; rotating part of that
+    # push 90 deg turns the bounce into a smooth go-around and breaks the
+    # symmetric-obstacle local minimum. Fraction of the horizontal repulsion
+    # magnitude; 0 disables.
+    tangential_gain: float = 1.5
+    # The swirl is tapered off close to an obstacle: below swirl_safe_radius the
+    # drone would otherwise keep circling the surface (velocity command aimed
+    # tangentially) instead of being pushed clear, so within that band the pure
+    # radial repulsion takes over and restores clearance. Full swirl is reached
+    # swirl_taper_band metres further out; the go-around still happens at the
+    # mid-range where obstacles are first felt.
+    swirl_safe_radius: float = 0.5
+    swirl_taper_band: float = 0.5
+
     # Velocity command
     v_max: float = 1.5
+
+    # Acceleration (slew-rate) limit on the velocity command, m/s^2. Bounds how
+    # fast the command may change between ticks, low-pass filtering the steep
+    # near-obstacle field that otherwise makes a memoryless APF chatter. Also a
+    # realistic soft-start / soft-turn for the flight controller. inf disables.
+    max_accel: float = 4.0
 
     # Goal
     goal_threshold: float = 0.5
@@ -115,6 +141,41 @@ def repulsive_force(pos, obstacle_points, cfg: Config):
     return force
 
 
+def swirl_taper(dist_nearest, cfg: Config):
+    """0 within swirl_safe_radius (radial push dominates -> clearance), ramping
+    to 1 over swirl_taper_band (full go-around swirl at mid-range)."""
+    band = max(cfg.swirl_taper_band, 1e-6)
+    return float(np.clip((dist_nearest - cfg.swirl_safe_radius) / band, 0.0, 1.0))
+
+
+def tangential_force(f_rep, goal_dir, dist_nearest, cfg: Config):
+    """Swirl term: the horizontal repulsion rotated 90 deg toward the goal side.
+
+    Scales with the horizontal repulsion magnitude, so it only acts near
+    obstacles and vanishes in open space. Kept horizontal so the vertical
+    fly-over behaviour is untouched. The rotation sign is chosen once per call
+    from the goal direction (deterministic - no per-tick flip-flop of its own),
+    and it is tapered off within swirl_safe_radius so the drone is pushed clear
+    of a surface instead of orbiting it (see swirl_taper).
+    """
+    if cfg.tangential_gain <= 0.0:
+        return np.zeros(3)
+    taper = swirl_taper(dist_nearest, cfg)
+    if taper <= 0.0:
+        return np.zeros(3)
+    r = np.asarray(f_rep, dtype=float)[:2]        # horizontal repulsion
+    nr = float(np.linalg.norm(r))
+    if nr < 1e-9:
+        return np.zeros(3)
+    u = r / nr
+    perp = np.array([-u[1], u[0]])                # +90 deg in the N-E plane
+    g = np.asarray(goal_dir, dtype=float)[:2]
+    if float(np.dot(perp, g)) < 0.0:
+        perp = -perp                              # steer around toward the goal
+    t = cfg.tangential_gain * taper * nr * perp
+    return np.array([t[0], t[1], 0.0])
+
+
 def force_to_velocity(force, cfg: Config):
     """Treat the total force as a desired velocity, clamped to v_max."""
     force = np.asarray(force, dtype=float)
@@ -124,17 +185,59 @@ def force_to_velocity(force, cfg: Config):
     return force.copy()
 
 
-def apf_step(pos, goal, obstacle_points, cfg: Config):
-    """One APF evaluation: returns (v_cmd(3,), info dict for logging)."""
+def limit_acceleration(v_prev, v_desired, dt, cfg: Config):
+    """Clamp the per-tick change of the velocity command to max_accel * dt.
+
+    A temporal low-pass on the command: the memoryless field can swing from
+    full push to full pull between ticks near an obstacle, and that is the
+    oscillation the drone shows. Bounding the step turns those swings into a
+    smooth turn. Feed it the previous *command* (not the measured velocity) so
+    the limiter stays deterministic and independent of odometry noise.
+    """
+    v_prev = np.asarray(v_prev, dtype=float)
+    v_desired = np.asarray(v_desired, dtype=float)
+    if not np.isfinite(cfg.max_accel):
+        return v_desired.copy()
+    dv = v_desired - v_prev
+    max_step = cfg.max_accel * dt
+    n = float(np.linalg.norm(dv))
+    if n > max_step:
+        dv = dv / n * max_step
+    return v_prev + dv
+
+
+def apf_step(pos, goal, obstacle_points, cfg: Config, v_prev=None, dt=None):
+    """One APF evaluation: returns (v_cmd(3,), info dict for logging).
+
+    When v_prev and dt are supplied the command is acceleration-limited against
+    the previous command (recommended - this is what suppresses near-obstacle
+    oscillation). Called without them it returns the raw field velocity, which
+    keeps the force-field unit tests independent of the smoothing.
+    """
+    pos = np.asarray(pos, dtype=float)
+    goal = np.asarray(goal, dtype=float)
+    pts = np.asarray(obstacle_points, dtype=float).reshape(-1, 3)
+    dist_nearest = (float(np.min(np.linalg.norm(pts - pos[None, :], axis=1)))
+                    if pts.shape[0] else np.inf)
     f_att = attractive_force(pos, goal, cfg)
     f_rep = repulsive_force(pos, obstacle_points, cfg)
-    f_total = f_att + f_rep
-    v_cmd = force_to_velocity(f_total, cfg)
+    f_tan = tangential_force(f_rep, goal - pos, dist_nearest, cfg)
+    f_obstacle = f_rep + f_tan
+    f_total = f_att + f_obstacle
+    v_desired = force_to_velocity(f_total, cfg)
+    if v_prev is not None and dt is not None:
+        v_cmd = limit_acceleration(v_prev, v_desired, dt, cfg)
+    else:
+        v_cmd = v_desired
     info = {
         "f_att": f_att,
-        "f_rep": f_rep,
+        # full obstacle response (radial + swirl) so the CSV and RViz arrow
+        # show what the drone actually feels; repulsive_force stays pure radial
+        "f_rep": f_obstacle,
+        "f_tan": f_tan,
         "f_total": f_total,
-        "dist_goal": float(np.linalg.norm(np.asarray(goal, dtype=float) - np.asarray(pos, dtype=float))),
+        "v_desired": v_desired,
+        "dist_goal": float(np.linalg.norm(goal - pos)),
     }
     return v_cmd, info
 

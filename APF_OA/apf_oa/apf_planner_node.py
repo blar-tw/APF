@@ -61,10 +61,14 @@ class ApfPlannerNode(Node):
         self.declare_parameter('goal_threshold', 0.5)
         self.declare_parameter('k_att', 0.8)
         self.declare_parameter('att_saturation', 3.0)
-        self.declare_parameter('k_rep', 1.2)
-        self.declare_parameter('influence_radius', 2.5)
+        self.declare_parameter('k_rep', 1.8)
+        self.declare_parameter('influence_radius', 3.0)
         self.declare_parameter('max_rep_force', 6.0)
+        self.declare_parameter('tangential_gain', 1.5)
+        self.declare_parameter('swirl_safe_radius', 0.5)
+        self.declare_parameter('swirl_taper_band', 0.5)
         self.declare_parameter('v_max', 1.5)
+        self.declare_parameter('max_accel', 4.0)
         self.declare_parameter('stuck_speed_eps', 0.1)
         self.declare_parameter('stuck_ticks', 40)
         self.declare_parameter('log_dir', os.path.expanduser('~/ws/src/APF/logs'))
@@ -75,7 +79,11 @@ class ApfPlannerNode(Node):
             k_rep=float(self.get_parameter('k_rep').value),
             influence_radius=float(self.get_parameter('influence_radius').value),
             max_rep_force=float(self.get_parameter('max_rep_force').value),
+            tangential_gain=float(self.get_parameter('tangential_gain').value),
+            swirl_safe_radius=float(self.get_parameter('swirl_safe_radius').value),
+            swirl_taper_band=float(self.get_parameter('swirl_taper_band').value),
             v_max=float(self.get_parameter('v_max').value),
+            max_accel=float(self.get_parameter('max_accel').value),
             goal_threshold=float(self.get_parameter('goal_threshold').value),
             stuck_speed_eps=float(self.get_parameter('stuck_speed_eps').value),
             stuck_ticks=int(self.get_parameter('stuck_ticks').value),
@@ -102,10 +110,12 @@ class ApfPlannerNode(Node):
         self.last_path_sec = 0.0
 
         # --- state ---
+        self.dt = 0.05              # control period (s), matches the 20 Hz timer
         self.nav_state = 'INIT'
         self.heartbeat_counter = 0
         self.pos = np.zeros(3)      # NED
         self.vel = np.zeros(3)      # NED
+        self.v_cmd_prev = np.zeros(3)  # last commanded velocity, for accel limit
         self.yaw = 0.0
         self.have_odom = False
         self.obstacles = None       # (N, 3) NED
@@ -172,6 +182,7 @@ class ApfPlannerNode(Node):
                                            yaw=self.yaw_to_goal())
             if self.have_odom and self.pos[2] < (self.takeoff_alt + 0.2):
                 self.nav_state = 'NAVIGATE'
+                self.v_cmd_prev = self.vel.copy()  # seed accel limiter from real motion
                 self.get_logger().info('Reached takeoff altitude, APF navigation starts')
 
         elif self.nav_state == 'NAVIGATE':
@@ -197,6 +208,7 @@ class ApfPlannerNode(Node):
             # Hover until the obstacle source is up rather than flying blind
             self.publish_position_setpoint(0.0, 0.0, self.takeoff_alt,
                                            yaw=self.yaw_to_goal())
+            self.v_cmd_prev = self.vel.copy()  # resume the accel limiter from rest
             if now - self.last_warn_sec > 2.0:
                 self.get_logger().warn('No /apf/obstacle_points yet - hovering')
                 self.last_warn_sec = now
@@ -206,7 +218,9 @@ class ApfPlannerNode(Node):
                 f'Obstacle cloud is stale ({now - self.last_cloud_sec:.1f}s old)')
             self.last_warn_sec = now
 
-        v_cmd, info = apf_core.apf_step(self.pos, self.goal_ned, self.obstacles, self.cfg)
+        v_cmd, info = apf_core.apf_step(self.pos, self.goal_ned, self.obstacles,
+                                        self.cfg, v_prev=self.v_cmd_prev, dt=self.dt)
+        self.v_cmd_prev = v_cmd
 
         speed = float(np.linalg.norm(self.vel))
         stuck = self.stuck_detector.update(speed, dist_goal, pos=self.pos)

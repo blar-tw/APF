@@ -10,10 +10,14 @@ apf_planner_node:
     goal_threshold: 0.5
     k_att: 0.8              # attraction gain (proportional to distance)
     att_saturation: 3.0     # pull stops growing beyond this distance (m)
-    k_rep: 1.2              # repulsion gain
-    influence_radius: 2.5   # repulsion cutoff d0 (m)
+    k_rep: 1.8              # repulsion gain (raised for earlier/stronger avoidance)
+    influence_radius: 3.0   # repulsion cutoff d0 (m)
     max_rep_force: 6.0      # clip on the summed repulsion
+    tangential_gain: 1.5    # swirl: horizontal go-around force / |Frep| (0 = off)
+    swirl_safe_radius: 0.5  # swirl tapers to 0 within this obstacle distance (m)
+    swirl_taper_band: 0.5   # swirl ramps to full over this band past safe_radius (m)
     v_max: 1.5              # velocity command clamp (m/s)
+    max_accel: 4.0          # velocity slew limit (m/s^2), smooths chatter (inf = off)
     stuck_speed_eps: 0.1    # local-minima: speed threshold (m/s)
     stuck_ticks: 40         # local-minima: consecutive ticks (40 @ 20Hz = 2s)
     log_dir: /home/blar/ws/src/APF/logs
